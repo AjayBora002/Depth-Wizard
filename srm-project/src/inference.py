@@ -152,7 +152,7 @@ def enhanced_post_process(sr_image: np.ndarray, lr_image: Optional[np.ndarray] =
         for i in range(min(c, lr_c)):
             lr = lr_image[i]
             # Extract high-frequency details from LR
-            blurred_lr = cv2.GaussianBlur(lr, (0, 0), sigma=0.5)
+            blurred_lr = cv2.GaussianBlur(lr, (0, 0), sigmaX=0.5, sigmaY=0.5)
             laplacian = lr - blurred_lr
 
             # Upscale detail to SR dimensions
