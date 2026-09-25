@@ -211,6 +211,8 @@ def run_inference(
     rgb_band_indices: tuple = (2, 1, 0),
     sharpen: float = 0.5,
     high_quality: bool = False,
+    joint_spectral: bool = False,
+    **kwargs,
 ) -> dict:
     """
     Run full inference on a single GeoTIFF and save outputs.
