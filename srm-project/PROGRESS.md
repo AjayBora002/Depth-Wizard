@@ -68,27 +68,24 @@ python src/pair_generation.py --raw-dir data/raw --out-dir data/synthetic_pairs 
 **Done:**
 - `src/model.py` — Real-ESRGAN wrapper:
   - Auto-downloads `RealESRGAN_x4plus.pth` from GitHub releases on first run
-  - `enhance_multiband()` handles Sentinel-2 multi-band (RGB via standard 3-ch ESRGAN, other bands via grayscale-to-3ch)
+  - `enhance_multiband()` handles Sentinel-2 multi-band (RGB via standard 3-ch ESRGAN, other bands via batched grayscale-to-3ch passes)
+  - `joint_spectral` option integrated with `src/spectral_fusion.py`
   - `load_generator_for_training()` extracts bare RRDB generator for fine-tuning
   - `save_generator_checkpoint()` saves in RealESRGAN-compatible format
-- `src/train.py` — local GPU fine-tuning script:
-  - L1 pixel loss + VGG16 perceptual loss
-  - Cosine LR annealing
-  - Best-checkpoint tracking
-  - Training history JSON saved
+- `src/spectral_fusion.py` — **Joint Multi-Band Spectral Modeling**:
+  - `ChannelSpectralAttention` dual-pooling inter-band correlation modeling
+  - `JointSpectralRefiner` post-SR cross-spectral residual refinement block
+  - `JointSpectralSR` wrapper pairing base generator with multi-band joint modeling
+- `src/train.py` — **Unified training script** (consolidated with train_enhanced.py):
+  - L1 + VGG16 Perceptual + SAM + Sobel Edge + FFT Frequency + Multi-Scale Pyramid loss
+  - Linear warmup + Cosine Annealing learning rate schedule
+  - D4 dihedral symmetry data augmentation
+  - Memory-efficient gradient checkpointing support
+  - Mixed precision training (AMP) + gradient clipping
+  - SSIM + PSNR + SAM validation and early stopping
+  - Clean ablation configuration system (`--ablation` presets) with zero overhead when lambda=0
+- `scripts/run_ablations.py` — automated runner for controlled comparison studies
 - `notebooks/colab_finetune.ipynb` — self-contained Colab backup
-
-**To fine-tune (after pairs are generated):**
-```bash
-python src/train.py --pairs-dir data/synthetic_pairs --epochs 50 --batch-size 4
-```
-
-**Checkpoint location after training:**
-```
-src/checkpoints/model_finetuned_best.pth
-src/checkpoints/model_finetuned_final.pth
-src/checkpoints/training_history.json
-```
 
 ---
 
@@ -98,15 +95,15 @@ src/checkpoints/training_history.json
 - `src/metrics.py`:
   - `psnr()` — scikit-image `peak_signal_noise_ratio`
   - `ssim()` — scikit-image `structural_similarity` (per-band averaged)
-  - `sam()` — **custom implementation** of Spectral Angle Mapper:
+  - `sam()` — custom Spectral Angle Mapper:
     - `per-pixel SAM = arccos(dot(u,v) / (||u|| * ||v||))`
     - `scene SAM = mean over valid pixels (degrees)`
-  - `evaluate_pair()` — convenience wrapper returning all three
+  - `sre()` — Signal to Reconstruction Error ratio (dB)
+  - `ergas()` — Erreur Relative Globale Adimensionnelle de Synthèse
+  - `uiq()` — Universal Image Quality Index (Wang & Bovik 2002)
+  - `evaluate_pair()` — returns all 6 metrics
   - `evaluate_directory()` — batch evaluation over directories
-- All metrics produce sane values on known synthetic inputs (verified by tests)
-
-**SAM citation:** Yuhas et al. (1992) AVIRIS Workshop — standard remote sensing metric
-for spectral consistency, explicitly required by problem statement.
+- All metrics verified with unit tests (identical pairs, degraded pairs, range checks)
 
 ---
 

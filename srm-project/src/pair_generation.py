@@ -150,12 +150,16 @@ def generate_pairs_from_tile(
     scale: int = 4,
     rgb_only: bool = False,
     apply_jpeg: bool = True,
+    max_patches: Optional[int] = None,
     seed: Optional[int] = 42,
 ) -> int:
     """
     Tile a GeoTIFF, apply the degradation model, and save (LR, HR) patch pairs.
 
     Pair filenames: {stem}_{row:04d}_{col:04d}_lr.npy / _hr.npy
+
+    Supports diverse geographic locations, multi-band or single-band tiles,
+    and optional patch limits per tile for balanced training.
 
     Returns the number of pairs generated.
     """
@@ -180,22 +184,37 @@ def generate_pairs_from_tile(
             np.dtype(src.dtypes[0]), np.integer
         ) else 1.0
 
-        stride = patch_size - overlap
-        row_starts = list(range(0, H - patch_size + 1, stride))
-        if not row_starts or row_starts[-1] + patch_size < H:
-            row_starts.append(max(0, H - patch_size))
-        col_starts = list(range(0, W - patch_size + 1, stride))
-        if not col_starts or col_starts[-1] + patch_size < W:
-            col_starts.append(max(0, W - patch_size))
+        # Adjust patch size if tile is smaller than default patch_size
+        eff_patch = min(patch_size, min(H, W))
+        eff_patch = (eff_patch // scale) * scale
+        if eff_patch < scale * 8:
+            logger.warning("Tile %s is too small (%dx%d), skipping", tile_path.name, W, H)
+            return 0
+
+        stride = max(scale, eff_patch - overlap)
+        row_starts = list(range(0, H - eff_patch + 1, stride))
+        if not row_starts or row_starts[-1] + eff_patch < H:
+            row_starts.append(max(0, H - eff_patch))
+        col_starts = list(range(0, W - eff_patch + 1, stride))
+        if not col_starts or col_starts[-1] + eff_patch < W:
+            col_starts.append(max(0, W - eff_patch))
 
         bands_to_use = [1, 2, 3] if (rgb_only and n_bands >= 3) else list(range(1, n_bands + 1))
 
         for ri, row_off in enumerate(row_starts):
+            if max_patches is not None and count >= max_patches:
+                break
             for ci, col_off in enumerate(col_starts):
-                win = Window(col_off, row_off, patch_size, patch_size)
-                data = src.read(bands_to_use, window=win)   # (C, H, W) uint16
+                if max_patches is not None and count >= max_patches:
+                    break
+                win = Window(col_off, row_off, eff_patch, eff_patch)
+                data = src.read(bands_to_use, window=win)   # (C, H, W)
 
-                # Skip mostly-zero patches
+                # Ensure 3-channel RGB consistency if rgb_only is requested
+                if rgb_only and data.shape[0] == 1:
+                    data = np.repeat(data, 3, axis=0)
+
+                # Skip mostly-zero / empty border patches
                 if np.sum(data > 0) / data.size < 0.5:
                     continue
 
@@ -218,22 +237,41 @@ def generate_all_pairs(
     overlap: int = 64,
     scale: int = 4,
     rgb_only: bool = False,
+    patches_per_tile: Optional[int] = None,
+    max_patches_per_tile: Optional[int] = None,
     seed: int = 42,
 ) -> int:
-    """Generate pairs from all GeoTIFFs in raw_dir. Returns total pair count."""
+    """
+    Generate pairs from all GeoTIFFs across different locations in raw_dir.
+    Supports both .tif and .tiff files.
+    Returns total pair count.
+    """
     raw_dir = Path(raw_dir)
-    tifs = sorted(raw_dir.glob("**/*.tif")) + sorted(raw_dir.glob("**/*.tiff"))
+    limit = max_patches_per_tile if max_patches_per_tile is not None else patches_per_tile
+
+    # Find all .tif and .tiff files (case-insensitive)
+    tifs = sorted([
+        p for p in raw_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in (".tif", ".tiff")
+    ])
     if not tifs:
         logger.error("No GeoTIFF files found in %s", raw_dir)
         return 0
 
+    logger.info("Discovered %d raw GeoTIFF tiles across locations in %s", len(tifs), raw_dir)
     total = 0
     for tif in tifs:
         total += generate_pairs_from_tile(
-            tif, out_dir, patch_size=patch_size, overlap=overlap, scale=scale,
-            rgb_only=rgb_only, seed=seed,
+            tif,
+            out_dir,
+            patch_size=patch_size,
+            overlap=overlap,
+            scale=scale,
+            rgb_only=rgb_only,
+            max_patches=limit,
+            seed=seed,
         )
-    logger.info("Total pairs generated: %d", total)
+    logger.info("Total pairs generated across all locations: %d", total)
     return total
 
 

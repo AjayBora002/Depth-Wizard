@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.metrics import psnr, ssim, sam, evaluate_pair
+from src.metrics import psnr, ssim, sam, sre, ergas, uiq, evaluate_pair
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -180,6 +180,39 @@ class TestSAM:
         assert abs(score - 90.0) < 1.0, f"Orthogonal vectors should give ~90°, got {score}"
 
 
+class TestSRE:
+    def test_identical_images_infinite_sre(self, perfect_pair):
+        pred, gt = perfect_pair
+        assert sre(pred, gt) == float("inf")
+
+    def test_noisy_sre_in_valid_range(self, noisy_pair):
+        pred, gt = noisy_pair
+        val = sre(pred, gt)
+        assert 10.0 <= val <= 50.0
+
+
+class TestERGAS:
+    def test_identical_images_zero_ergas(self, perfect_pair):
+        pred, gt = perfect_pair
+        assert abs(ergas(pred, gt)) < 1e-5
+
+    def test_noisy_ergas_positive(self, noisy_pair):
+        pred, gt = noisy_pair
+        val = ergas(pred, gt, scale=4.0)
+        assert val > 0.0
+
+
+class TestUIQ:
+    def test_identical_images_uiq_one(self, perfect_pair):
+        pred, gt = perfect_pair
+        assert abs(uiq(pred, gt) - 1.0) < 1e-4
+
+    def test_noisy_uiq_in_range(self, noisy_pair):
+        pred, gt = noisy_pair
+        val = uiq(pred, gt)
+        assert 0.0 <= val <= 1.0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Integrated evaluate_pair
 # ──────────────────────────────────────────────────────────────────────────────
@@ -191,6 +224,9 @@ class TestEvaluatePair:
         assert "psnr" in result
         assert "ssim" in result
         assert "sam_deg" in result
+        assert "sre" in result
+        assert "ergas" in result
+        assert "uiq" in result
 
     def test_perfect_pair_scores(self, perfect_pair):
         pred, gt = perfect_pair
@@ -198,6 +234,9 @@ class TestEvaluatePair:
         assert result["psnr"] > 100.0 or result["psnr"] == float("inf")
         assert abs(result["ssim"] - 1.0) < 1e-4
         assert abs(result["sam_deg"]) < 1e-4
+        assert result["sre"] == float("inf")
+        assert abs(result["ergas"]) < 1e-4
+        assert abs(result["uiq"] - 1.0) < 1e-4
 
     def test_noisy_pair_scores_degrade(self, noisy_pair):
         pred, gt = noisy_pair
@@ -205,3 +244,6 @@ class TestEvaluatePair:
         assert result["psnr"] < 60.0
         assert result["ssim"] < 1.0
         assert result["sam_deg"] > 0.0
+        assert result["ergas"] > 0.0
+        assert result["uiq"] < 1.0
+

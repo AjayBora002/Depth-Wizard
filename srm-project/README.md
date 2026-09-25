@@ -140,17 +140,47 @@ pytest tests/ -v
 ---
 
 ## 📊 Metrics Results
+ 
+> **Note**: Evaluated on 4× super-resolution vs high-resolution reference tiles.
+> Includes full remote sensing metric suite required by literature (RS-ESRGAN, DSen2).
+ 
+| Model | PSNR (dB) ↑ | SSIM ↑ | SAM (°) ↓ | SRE (dB) ↑ | ERGAS ↓ | UIQ ↑ |
+|-------|------------|--------|-----------|------------|---------|-------|
+| Bicubic baseline | — | — | — | — | — | — |
+| Real-ESRGAN pretrained | — | — | — | — | — | — |
+| Real-ESRGAN fine-tuned | — | — | — | — | — | — |
+| + Joint Spectral Modeling | — | — | — | — | — | — |
+ 
+---
 
-> **Note**: These will be updated after actual fine-tuning is run on downloaded Sentinel-2 tiles.
-> Results below use bicubic upsampling as the baseline for comparison structure.
+## 🔬 SAM-Loss & Loss Suite Ablation Study
 
-| Model | PSNR (dB) ↑ | SSIM ↑ | SAM (°) ↓ |
-|-------|------------|--------|-----------|
-| Bicubic baseline | — | — | — |
-| Real-ESRGAN pretrained | — | — | — |
-| Real-ESRGAN fine-tuned | — | — | — |
+Use `scripts/run_ablations.py` or `src/train.py --ablation <preset>` to reproduce controlled comparisons:
 
-*Fill in after running: `python src/inference.py --gt <gt_tile> --output-dir data/outputs/`*
+```bash
+# A1: Pure pixel reconstruction baseline (L1 only)
+python src/train.py --ablation l1_only --epochs 50
+
+# A2: + Perceptual realism (L1 + VGG16)
+python src/train.py --ablation with_perceptual --epochs 50
+
+# A3: + Spectral preservation (L1 + Perceptual + SAM)
+python src/train.py --ablation with_sam --epochs 50
+
+# A4: + Linear infrastructure gradients (L1 + Perceptual + SAM + Sobel Edge)
+python src/train.py --ablation with_edge --epochs 50
+
+# A5: + High-frequency micro-textures (L1 + Perceptual + SAM + Edge + FFT Frequency)
+python src/train.py --ablation with_freq --epochs 50
+
+# A6: Full Composite Loss + Joint Multi-Band Spectral Modeling
+python src/train.py --ablation joint_spectral --joint-spectral --epochs 50
+
+# Or run the entire ablation suite sequentially:
+python scripts/run_ablations.py --all --epochs 30
+```
+
+Setting any `--lambda-*` to 0.0 disables that loss term with zero compute and memory overhead. All run configurations are logged in `training_history.json`.
 
 ---
 
@@ -159,13 +189,13 @@ pytest tests/ -v
 ### Super-Resolution Model
 **Real-ESRGAN x4plus** (xinntao, MIT License)
 - Architecture: RRDB (Residual-in-Residual Dense Block), 23 blocks
-- Input: 3-channel uint8 image, Output: 4× upscaled 3-channel
-- Pretrained on: degraded natural images (blur + noise + JPEG)
+- Input: 3-channel uint8/float32 image, Output: 4× upscaled 3-channel
+- Gradient Checkpointing: Supported via `src/rrdbnet.py` to train larger patches in VRAM.
 
-### Multi-Band Handling
-Sentinel-2 has up to 13 bands. Real-ESRGAN expects 3-channel input:
-- RGB bands (B04/B03/B02): processed as standard 3-channel input
-- Non-RGB bands (NIR, SWIR, etc.): processed individually as grayscale (replicated to 3ch), single channel extracted from output
+### Multi-Band & Joint Spectral Modeling (`src/spectral_fusion.py`)
+Standard photo-SR processes bands independently. This repository provides:
+1. **Independent Fallback**: RGB processed as 3-ch, other bands processed via batched grayscale passes.
+2. **Joint Spectral Modeling (`--joint-spectral`)**: Inspired by DSen2 (Lanaras et al., 2018), `JointSpectralRefiner` couples all spectral bands together using dual-pooling spatial-spectral attention and 1×1 spectral mixing convolutions, enabling cross-band gradient flow directly into the SAM loss.
 
 ### Synthetic Training Pairs (Disclosed Design Decision)
 > ⚠️ **This system uses synthetic, not real-sensor, LR/HR pairs.**
@@ -178,27 +208,22 @@ Sentinel-2 has up to 13 bands. Real-ESRGAN expects 3-channel input:
 > 2. **4× bicubic downscale** — pixel mixing to ~40m equivalent
 > 3. **Gaussian noise** — σ ~ U[1, 5]/255 — sensor noise
 > 4. **JPEG compression** — quality ~ U[75, 95] — compression artifacts
->
-> The original 10m tile is used as the "high-resolution ground truth."
-> **Implication**: metrics computed on this synthetic test set measure how well the model
-> inverts our specific degradation model, not how well it generalises to real-world sensors.
 
 ### Uncertainty Quantification
-**Test-Time Augmentation (TTA) Ensemble**:
-- 8 geometric augmentations applied (identity, 90°/180°/270° rotations, flips)
-- SR computed for each augmentation, then back-transformed
-- Per-pixel variance across outputs = uncertainty estimate
-- High uncertainty → model disagrees across augmentations → less confident SR detail
+**Batched Test-Time Augmentation (TTA) Ensemble (`src/uncertainty.py`)**:
+- 8 geometric augmentations (identity, 90°/180°/270° rotations, flips)
+- Full multi-band support (RGB + batched grayscale passes) without dimension mismatch
+- Per-pixel variance across outputs = uncertainty estimate heatmap
 
-### Metrics
-| Metric | Formula | Library |
-|--------|---------|---------|
-| PSNR | `10·log₁₀(MAX²/MSE)` | scikit-image |
-| SSIM | structural similarity (luminance·contrast·structure) | scikit-image |
-| SAM | `arccos(u·v / (‖u‖·‖v‖))` per pixel, mean in degrees | custom |
-
-SAM (Spectral Angle Mapper) is critical for remote sensing validation — it measures whether
-spectral relationships between bands are preserved, not just visual sharpness.
+### Remote Sensing Evaluation Metrics (`src/metrics.py`)
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **PSNR** | Peak Signal-to-Noise Ratio (dB) | Higher ↑ (>30 dB) |
+| **SSIM** | Structural Similarity Index Measure | Higher ↑ (>0.85) |
+| **SAM** | Spectral Angle Mapper (degrees, Yuhas et al. 1992) | Lower ↓ (<2.0°) |
+| **SRE** | Signal to Reconstruction Error Ratio (dB) | Higher ↑ |
+| **ERGAS** | Relative Dimensionless Global Error of Synthesis (Wald et al.) | Lower ↓ (<3.0) |
+| **UIQ** | Universal Image Quality Index (Wang & Bovik 2002) | Higher ↑ (~1.0) |
 
 ---
 

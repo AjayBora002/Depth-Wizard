@@ -321,6 +321,7 @@ def run_inference(
                     lr_patch, generator, device,
                     n_augmentations=tta_n,
                     half=(half and device.type == "cuda"),
+                    rgb_band_indices=rgb_band_indices,
                 )
             else:
                 # FAST PATH (Fix B): pass generator so grayscale bands are batched.

@@ -214,43 +214,8 @@ def extract_rgb_preview(
     return (out.transpose(1, 2, 0) * 255).astype(np.uint8)   # (H, W, 3)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Reconstruct full SR image from patch outputs
-# ──────────────────────────────────────────────────────────────────────────────
-
-def reconstruct_from_patches(
-    patches: List[Tuple[np.ndarray, Affine]],
-    full_height: int,
-    full_width: int,
-    scale: int = 4,
-) -> np.ndarray:
-    """
-    Blend overlapping SR patches back into a full-resolution image.
-    patches : list of (array (C,H,W), patch_transform)
-    Returns  : float32 (C, full_height*scale, full_width*scale)
-    """
-    if not patches:
-        raise ValueError("No patches provided to reconstruct_from_patches")
-
-    c = patches[0][0].shape[0]
-    out_h = full_height * scale
-    out_w = full_width * scale
-    canvas = np.zeros((c, out_h, out_w), dtype=np.float64)
-    weight = np.zeros((out_h, out_w), dtype=np.float64)
-
-    # Use a Hann window for smooth blending at boundaries
-    patch_h, patch_w = patches[0][0].shape[1:]
-    win_h = np.hanning(patch_h)
-    win_w = np.hanning(patch_w)
-    blend_window = np.outer(win_h, win_w)   # (H, W)
-
-    for arr, _ in patches:
-        # We embed sequentially; for proper geo-reconstruction see inference.py
-        # which tracks (row_off, col_off) per patch in SR space
-        pass  # handled in inference.py with offsets
-
-    # Fallback: simple concatenation (inference.py does the proper weighted blend)
-    return canvas.astype(np.float32)
+# NOTE: Patch reconstruction and Hann-window overlap blending are implemented in
+# src/inference.py (run_inference) using geo-referencing coordinates and SR offsets.
 
 
 # ──────────────────────────────────────────────────────────────────────────────

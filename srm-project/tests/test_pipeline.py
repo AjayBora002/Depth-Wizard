@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rasterio
+import torch
+import torch.nn.functional as F
 from affine import Affine
 from rasterio.crs import CRS
 
@@ -27,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.preprocessing import validate_tile, extract_rgb_preview
 from src.pair_generation import degrade, generate_pairs_from_tile, SyntheticPairDataset
 from src.metrics import evaluate_pair
-from src.uncertainty import tta_ensemble, uncertainty_to_heatmap
+from src.uncertainty import tta_ensemble, tta_ensemble_batched, uncertainty_to_heatmap
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -118,6 +120,45 @@ class TestPairGeneration:
         lr, hr = train_ds[0]
         assert lr.dtype == np.float32 or hasattr(lr, "float")
 
+    def test_generate_all_pairs_multilocation(self, tmp_path):
+        """Test pair generation discovering multiple locations (.tif and .tiff)."""
+        from src.pair_generation import generate_all_pairs
+        from src.train import CropDataset, _collate_fn
+        raw_dir = tmp_path / "raw"
+        raw_dir.mkdir()
+
+        # Create tile 1: 3-band Delhi (tif)
+        t1 = raw_dir / "Delhi_Sample.tif"
+        rng = np.random.default_rng(1)
+        data1 = rng.integers(1000, 10000, (3, 64, 64), dtype=np.uint16)
+        transform = Affine(10.0, 0.0, 0.0, 0.0, -10.0, 0.0)
+        with rasterio.open(t1, "w", driver="GTiff", height=64, width=64, count=3, dtype=np.uint16, transform=transform) as dst:
+            dst.write(data1)
+
+        # Create tile 2: 1-band Mumbai (tiff)
+        t2 = raw_dir / "Mumbai_B02.tiff"
+        data2 = rng.integers(1000, 10000, (1, 64, 64), dtype=np.uint16)
+        with rasterio.open(t2, "w", driver="GTiff", height=64, width=64, count=1, dtype=np.uint16, transform=transform) as dst:
+            dst.write(data2)
+
+        out_dir = tmp_path / "pairs_multi"
+        total = generate_all_pairs(
+            raw_dir=raw_dir,
+            out_dir=out_dir,
+            patch_size=32,
+            overlap=0,
+            scale=4,
+            rgb_only=True,
+            patches_per_tile=10,
+        )
+        assert total > 0
+        ds = SyntheticPairDataset(out_dir, split="train")
+        crop_ds = CropDataset(ds, crop_size=8, scale=4, rgb_only=True)
+        loader = torch.utils.data.DataLoader(crop_ds, batch_size=2, collate_fn=_collate_fn)
+        batch_lr, batch_hr = next(iter(loader))
+        assert batch_lr.shape == (2, 3, 8, 8), f"Expected (2, 3, 8, 8), got {batch_lr.shape}"
+        assert batch_hr.shape == (2, 3, 32, 32), f"Expected (2, 3, 32, 32), got {batch_hr.shape}"
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Uncertainty tests (no model required)
@@ -165,6 +206,41 @@ class TestUncertainty:
         assert heatmap.shape == (64, 64, 3)
         assert heatmap.dtype == np.uint8
 
+    def test_tta_ensemble_batched_multiband(self):
+        """tta_ensemble_batched processes multi-band (4-band, 9-band) without 3-channel generator crash."""
+        import torch
+        import torch.nn as nn
+
+        # Mock 3-channel in, 3-channel out generator (like RRDBNet)
+        class MockGenerator(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.up = nn.Upsample(scale_factor=4, mode="nearest")
+
+            def forward(self, x):
+                assert x.shape[1] == 3, f"Generator requires 3 channels, got {x.shape[1]}"
+                return self.up(x)
+
+        gen = MockGenerator()
+        device = torch.device("cpu")
+
+        # Test 4 bands (e.g. B04, B03, B02, B08)
+        lr_4b = np.random.rand(4, 16, 16).astype(np.float32)
+        mean_sr_4b, unc_4b = tta_ensemble_batched(
+            lr_4b, gen, device, n_augmentations=4, rgb_band_indices=(0, 1, 2)
+        )
+        assert mean_sr_4b.shape == (4, 64, 64)
+        assert unc_4b.shape == (64, 64)
+
+        # Test 9 bands (Sentinel-2 9-band)
+        lr_9b = np.random.rand(9, 16, 16).astype(np.float32)
+        mean_sr_9b, unc_9b = tta_ensemble_batched(
+            lr_9b, gen, device, n_augmentations=4, rgb_band_indices=(2, 1, 0)
+        )
+        assert mean_sr_9b.shape == (9, 64, 64)
+        assert unc_9b.shape == (64, 64)
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Metrics integration
@@ -207,3 +283,58 @@ class TestPreprocessingIntegration:
         rgb = extract_rgb_preview(small_tile)
         assert rgb.shape == (64, 64, 3)
         assert rgb.dtype == np.uint8
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Spectral Fusion Integration
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestSpectralFusion:
+    def test_spectral_attention_shape(self):
+        from src.spectral_fusion import ChannelSpectralAttention
+        att = ChannelSpectralAttention(num_channels=4)
+        x = torch.rand(2, 4, 16, 16)
+        out = att(x)
+        assert out.shape == (2, 4, 16, 16)
+
+    def test_joint_spectral_sr_forward(self):
+        import torch.nn as nn
+        from src.spectral_fusion import JointSpectralSR
+
+        class MockBaseGen(nn.Module):
+            def forward(self, x):
+                return F.interpolate(x, scale_factor=4, mode="nearest")
+
+        base = MockBaseGen()
+        joint_model = JointSpectralSR(base_generator=base, num_channels=4, rgb_band_indices=(0, 1, 2))
+        x = torch.rand(2, 4, 16, 16)
+        out = joint_model(x)
+        assert out.shape == (2, 4, 64, 64)
+        assert out.min() >= 0.0 and out.max() <= 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Temporal Fusion Integration
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestTemporalFusion:
+    def test_vectorized_cloud_aware_fusion(self):
+        from src.temporal_fusion import cloud_aware_fusion
+        rng = np.random.default_rng(42)
+        # Create a 3-frame temporal stack (T=3, C=4, H=32, W=32)
+        stack = rng.random((3, 4, 32, 32), dtype=np.float32)
+        # Artificially inject clouds (>0.85) in frame 0 and shadows (<0.15) in frame 1
+        stack[0, :3, :10, :10] = 0.95
+        stack[1, :3, 10:20, 10:20] = 0.05
+
+        fused = cloud_aware_fusion(stack)
+        assert fused.shape == (4, 32, 32)
+        assert not np.isnan(fused).any(), "Fused output contains NaNs"
+
+    def test_temporal_attention_module(self):
+        from src.temporal_fusion import TemporalAttentionModule
+        module = TemporalAttentionModule(in_channels=4, hidden_channels=16)
+        stack_t = torch.rand(3, 4, 16, 16)
+        fused_t = module(stack_t)
+        assert fused_t.shape == (4, 16, 16)
+

@@ -148,7 +148,7 @@ Examples:
   python run_demo.py --mode train --epochs 100
 
   # Only create demo visualizations
-  python run_demo.py --mode demo --input data/raw/S2_Delhi_Sample_512.tif
+  python run_demo.py --mode demo --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff
 """
     )
 

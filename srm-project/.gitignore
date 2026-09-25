@@ -32,6 +32,7 @@ data/raw/*.tiff
 data/raw/*.zip
 data/raw/*.jp2
 data/synthetic_pairs/
+data/training_pairs/
 data/outputs/*.tif
 data/outputs/*.tiff
 data/outputs/*.png
@@ -42,6 +43,7 @@ data/outputs/*.jp2
 # ─────────────────────────────────────────────────────────
 !data/raw/.gitkeep
 !data/synthetic_pairs/.gitkeep
+!data/training_pairs/.gitkeep
 !data/outputs/.gitkeep
 !src/checkpoints/.gitkeep
 

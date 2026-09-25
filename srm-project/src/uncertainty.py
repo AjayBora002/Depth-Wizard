@@ -161,17 +161,19 @@ def tta_ensemble_batched(
     device,                 # torch.device
     n_augmentations: int = 8,
     half: bool = False,
+    rgb_band_indices: Tuple[int, ...] = (0, 1, 2),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Batched TTA ensemble: run all N augmentations in ONE forward pass.
+    Batched TTA ensemble: run all N augmentations in batched forward pass(es).
 
-    Instead of calling the model N times sequentially, this function:
-      1. Applies _augment_chw to each of the N augmentations.
-      2. Stacks them into a single batch tensor of shape (N, C, H, W).
-      3. Calls generator.forward(batch) once → (N, C, H_sr, W_sr).
-      4. Deaugments each of the N outputs and aggregates mean + std.
-
-    This eliminates the N-1 redundant forward passes of tta_ensemble().
+    Supports multi-band Sentinel-2 inputs (e.g. 3, 4, 9, 12 bands):
+      1. Identifies RGB bands from rgb_band_indices and non-RGB (grayscale) bands.
+      2. For 3-channel RGB: augments and batches all N augmentations into (N, 3, H, W)
+         and runs a single generator.forward() pass.
+      3. For non-RGB bands: replicates each to 3 channels, batches augmentations,
+         and runs generator.forward() in chunks of n_aug, extracting channel 0.
+      4. Deaugments each band group consistently and aggregates across all bands
+         into mean_sr (C, H_sr, W_sr) and per-pixel uncertainty (H_sr, W_sr).
 
     Parameters
     ----------
@@ -180,6 +182,7 @@ def tta_ensemble_batched(
     device          : torch.device to run inference on
     n_augmentations : number of augmentations to use (max 8)
     half            : if True, use float16 (requires CUDA)
+    rgb_band_indices: indices of (R, G, B) bands within patch
 
     Returns
     -------
@@ -188,61 +191,98 @@ def tta_ensemble_batched(
     """
     import torch
 
+    c, h, w = lr_patch.shape
     n_aug = min(n_augmentations, 8)
+    valid_aug_ids = list(range(n_aug))
 
-    # ── Step 1: Build all augmented versions as numpy arrays ──────────────────
-    aug_patches = []
-    valid_aug_ids = []
-    for aug_id in range(n_aug):
-        try:
-            aug_lr = _augment_chw(lr_patch, aug_id)   # (C, H, W)
-            aug_patches.append(aug_lr)
-            valid_aug_ids.append(aug_id)
-        except Exception as exc:
-            logger.warning("TTA augmentation %d failed during prep: %s — skipping", aug_id, exc)
+    # Identify RGB vs grayscale bands
+    valid_rgb = [i for i in rgb_band_indices if i < c]
+    use_rgb = (len(valid_rgb) == 3)
+    gray_indices = [i for i in range(c) if (not use_rgb or i not in valid_rgb)]
 
-    if not aug_patches:
-        raise RuntimeError("All TTA augmentations failed during preparation")
-
-    # ── Step 2: Stack into a single batch tensor ──────────────────────────────
-    # Shape: (N_aug, C, H, W)
-    batch_np = np.stack(aug_patches, axis=0).astype(np.float32)
-    batch_t = torch.from_numpy(batch_np).to(device)
-    if half and device.type == "cuda":
-        batch_t = batch_t.half()
-
-    # ── Step 3: Single forward pass ───────────────────────────────────────────
-    t_fwd = time.time()
     was_training = generator.training
     generator.eval()
+    t_fwd = time.time()
+
     try:
-        with torch.no_grad():
-            sr_batch_t = generator(batch_t)   # (N_aug, C, H_sr, W_sr)
+        deaug_rgb = None
+        h_sr, w_sr = None, None
+
+        # ── 1. Process RGB bands if available ─────────────────────────────────
+        if use_rgb:
+            rgb_patch = lr_patch[list(valid_rgb)]  # (3, H, W)
+            aug_rgb_list = [_augment_chw(rgb_patch, aug_id) for aug_id in valid_aug_ids]
+            batch_rgb_np = np.stack(aug_rgb_list, axis=0).astype(np.float32)  # (N_aug, 3, H, W)
+            batch_rgb_t = torch.from_numpy(batch_rgb_np).to(device)
+            if half and device.type == "cuda":
+                batch_rgb_t = batch_rgb_t.half()
+
+            with torch.no_grad():
+                sr_rgb_t = generator(batch_rgb_t)  # (N_aug, 3, H_sr, W_sr)
+
+            sr_rgb_np = sr_rgb_t.float().cpu().numpy().clip(0, 1)
+            h_sr, w_sr = sr_rgb_np.shape[2], sr_rgb_np.shape[3]
+
+            # Deaugment each RGB output
+            deaug_rgb = np.stack([
+                _deaugment_chw(sr_rgb_np[i], aug_id)
+                for i, aug_id in enumerate(valid_aug_ids)
+            ], axis=0)  # (N_aug, 3, H_sr, W_sr)
+
+        # ── 2. Process non-RGB (grayscale) bands ──────────────────────────────
+        all_deaug_gray = {}
+        if gray_indices:
+            all_gray_aug = []
+            for g_idx in gray_indices:
+                g_patch = lr_patch[g_idx]  # (H, W)
+                g_3ch = np.stack([g_patch, g_patch, g_patch], axis=0)  # (3, H, W)
+                for aug_id in valid_aug_ids:
+                    all_gray_aug.append(_augment_chw(g_3ch, aug_id))
+
+            # Run in batches of n_aug to control VRAM usage
+            batch_size = n_aug
+            sr_gray_parts = []
+            for start_idx in range(0, len(all_gray_aug), batch_size):
+                chunk_np = np.stack(all_gray_aug[start_idx:start_idx + batch_size], axis=0).astype(np.float32)
+                chunk_t = torch.from_numpy(chunk_np).to(device)
+                if half and device.type == "cuda":
+                    chunk_t = chunk_t.half()
+                with torch.no_grad():
+                    sr_chunk_t = generator(chunk_t)
+                sr_gray_parts.append(sr_chunk_t[:, 0:1].float().cpu().numpy().clip(0, 1))
+
+            all_sr_gray = np.concatenate(sr_gray_parts, axis=0)  # (len(gray_indices) * n_aug, 1, H_sr, W_sr)
+            if h_sr is None:
+                h_sr, w_sr = all_sr_gray.shape[2], all_sr_gray.shape[3]
+
+            for g_pos, band_idx in enumerate(gray_indices):
+                band_sr_aug = all_sr_gray[g_pos * n_aug : (g_pos + 1) * n_aug]  # (N_aug, 1, H_sr, W_sr)
+                deaug_g = np.stack([
+                    _deaugment_chw(band_sr_aug[i], aug_id)
+                    for i, aug_id in enumerate(valid_aug_ids)
+                ], axis=0)  # (N_aug, 1, H_sr, W_sr)
+                all_deaug_gray[band_idx] = deaug_g[:, 0, :, :]
+
     finally:
         if was_training:
             generator.train()
-    logger.debug("TTA batched forward (%d augs) took %.3fs", n_aug, time.time() - t_fwd)
 
-    # Back to float32 numpy: (N_aug, C, H_sr, W_sr)
-    sr_batch_np = sr_batch_t.float().cpu().numpy().clip(0, 1)
+    logger.debug("TTA batched forward (%d augs, %d bands) took %.3fs", n_aug, c, time.time() - t_fwd)
 
-    # ── Step 4: Deaugment each output ─────────────────────────────────────────
-    outputs: List[np.ndarray] = []
-    for i, aug_id in enumerate(valid_aug_ids):
-        try:
-            sr_canonical = _deaugment_chw(sr_batch_np[i], aug_id)
-            outputs.append(sr_canonical)
-        except Exception as exc:
-            logger.warning("TTA deaugmentation %d failed: %s — skipping", aug_id, exc)
+    # ── 3. Assemble full output across all C channels ─────────────────────────
+    full_aug_outputs = np.zeros((n_aug, c, h_sr, w_sr), dtype=np.float32)
 
-    if not outputs:
-        raise RuntimeError("All TTA deaugmentations failed")
+    if use_rgb and deaug_rgb is not None:
+        for out_pos, band_idx in enumerate(valid_rgb):
+            full_aug_outputs[:, band_idx, :, :] = deaug_rgb[:, out_pos, :, :]
 
-    # ── Step 5: Aggregate ─────────────────────────────────────────────────────
-    stack = np.stack(outputs, axis=0)             # (N, C, H_sr, W_sr)
-    mean_sr = np.mean(stack, axis=0)              # (C, H_sr, W_sr)
-    std_map = np.std(stack, axis=0)               # (C, H_sr, W_sr)
-    uncertainty = np.mean(std_map, axis=0)        # (H_sr, W_sr)
+    for band_idx, deaug_band in all_deaug_gray.items():
+        full_aug_outputs[:, band_idx, :, :] = deaug_band
+
+    # ── 4. Aggregate mean and uncertainty ─────────────────────────────────────
+    mean_sr = np.mean(full_aug_outputs, axis=0)        # (C, H_sr, W_sr)
+    std_map = np.std(full_aug_outputs, axis=0)         # (C, H_sr, W_sr)
+    uncertainty = np.mean(std_map, axis=0)             # (H_sr, W_sr)
 
     return mean_sr.astype(np.float32), uncertainty.astype(np.float32)
 

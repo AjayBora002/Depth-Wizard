@@ -5,8 +5,8 @@ Generate impressive before/after comparisons for SIH showcase.
 Creates side-by-side visualizations with metrics overlay.
 
 Usage:
-  python src/demo_inference.py --input data/raw/S2_Delhi_Sample_512.tif --output demo_output.png
-  python src/demo_inference.py --input data/raw/S2_Delhi_NCR_10m.tif --output demo_output.png --compare
+  python src/demo_inference.py --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff --output demo_output.png
+  python src/demo_inference.py --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff --output demo_output.png --compare
 """
 
 from __future__ import annotations

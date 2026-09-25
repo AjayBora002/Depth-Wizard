@@ -243,6 +243,8 @@ def enhance_multiband(
     rgb_band_indices: Tuple[int, ...] = S2_RGB_BANDS,
     outscale: int = 4,
     generator: Optional[torch.nn.Module] = None,
+    joint_spectral: bool = False,
+    spectral_fusion_module: Optional[torch.nn.Module] = None,
 ) -> np.ndarray:
     """
     Run Real-ESRGAN on a Sentinel-2 multi-band patch.
@@ -325,9 +327,30 @@ def enhance_multiband(
             gray_u8 = (gray * 255).clip(0, 255).astype(np.uint8)
             gray_3ch = np.stack([gray_u8, gray_u8, gray_u8], axis=-1)  # (H, W, 3)
             sr_3ch, _ = upsampler.enhance(gray_3ch, outscale=outscale)  # (H*4, W*4, 3) uint8
-            sr_out[i] = sr_3ch[:, :, 0].astype(np.float32) / 255.0
+    sr_stack = np.stack(sr_out, axis=0)   # (C, H*4, W*4)
 
-    return np.stack(sr_out, axis=0)   # (C, H*4, W*4)
+    if joint_spectral:
+        try:
+            import torch
+            from src.spectral_fusion import JointSpectralRefiner
+            if spectral_fusion_module is None:
+                spectral_fusion_module = JointSpectralRefiner(num_channels=c)
+                if generator is not None:
+                    dev = next(generator.parameters()).device
+                    spectral_fusion_module = spectral_fusion_module.to(dev)
+            dev = next(spectral_fusion_module.parameters()).device
+            sr_t = torch.from_numpy(sr_stack[np.newaxis, ...]).to(dev)
+            was_training = spectral_fusion_module.training
+            spectral_fusion_module.eval()
+            with torch.no_grad():
+                sr_refined_t = spectral_fusion_module(sr_t)
+            if was_training:
+                spectral_fusion_module.train()
+            sr_stack = sr_refined_t.squeeze(0).float().cpu().numpy().clip(0, 1)
+        except Exception as exc:
+            logger.warning("Joint spectral fusion failed (%s), using unrefined SR", exc)
+
+    return sr_stack
 
 
 # ──────────────────────────────────────────────────────────────────────────────

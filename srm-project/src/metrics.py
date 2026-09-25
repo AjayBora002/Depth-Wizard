@@ -162,15 +162,148 @@ def sam(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-8) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# SRE — Signal to Reconstruction Error Ratio (dB)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def sre(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-10) -> float:
+    """
+    Signal to Reconstruction Error ratio in dB.
+    Standard remote-sensing metric:
+        SRE(dB) = 10 * log10( (mean(gt)**2) / (mean((pred - gt)**2) + eps) )
+
+    Parameters
+    ----------
+    pred, gt : float32 arrays of identical shape
+    eps      : small epsilon to avoid divide-by-zero
+
+    Returns
+    -------
+    float (dB); higher is better. Returns +inf if pred == gt.
+    """
+    pred = _to_chw(pred.astype(np.float32))
+    gt = _to_chw(gt.astype(np.float32))
+    _check_shapes(pred, gt)
+
+    if np.array_equal(pred, gt):
+        return float("inf")
+
+    mse = float(np.mean((pred - gt) ** 2))
+    if mse <= eps:
+        return float("inf")
+
+    mean_gt = float(np.mean(gt))
+    if abs(mean_gt) <= eps:
+        return 0.0
+
+    ratio = (mean_gt ** 2) / mse
+    return float(10.0 * np.log10(max(ratio, eps)))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ERGAS — Relative Dimensionless Global Error of Synthesis
+# ──────────────────────────────────────────────────────────────────────────────
+
+def ergas(pred: np.ndarray, gt: np.ndarray, scale: float = 4.0, eps: float = 1e-10) -> float:
+    """
+    Erreur Relative Globale Adimensionnelle de Synthèse (ERGAS).
+    Widely used in multi-spectral satellite super-resolution (DSen2, Wald et al.).
+        ERGAS = 100/scale * sqrt( 1/B * sum_{b=1}^B (RMSE_b / (mean(gt_b) + eps))**2 )
+
+    Parameters
+    ----------
+    pred, gt : float32 arrays of identical shape
+    scale    : super-resolution scale factor (e.g. 4 for 10m -> 2.5m)
+    eps      : small epsilon
+
+    Returns
+    -------
+    float; lower is better (0.0 = perfect reconstruction).
+    """
+    pred = _to_chw(pred.astype(np.float32))
+    gt = _to_chw(gt.astype(np.float32))
+    _check_shapes(pred, gt)
+
+    if np.array_equal(pred, gt):
+        return 0.0
+
+    c = pred.shape[0]
+    band_ratios_sq = []
+    for b in range(c):
+        rmse_b = float(np.sqrt(np.mean((pred[b] - gt[b]) ** 2)))
+        mean_b = float(np.mean(gt[b]))
+        if abs(mean_b) <= eps:
+            band_ratios_sq.append(0.0)
+        else:
+            band_ratios_sq.append((rmse_b / mean_b) ** 2)
+
+    mean_sq = float(np.mean(band_ratios_sq))
+    return float((100.0 / scale) * np.sqrt(mean_sq))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UIQ — Universal Image Quality Index
+# ──────────────────────────────────────────────────────────────────────────────
+
+def uiq(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-10) -> float:
+    """
+    Universal Image Quality Index (UIQ, Wang & Bovik 2002).
+    Evaluates loss of correlation, luminance distortion, and contrast distortion:
+        Q = (4 * cov_xy * mean_x * mean_y) / ((var_x + var_y) * (mean_x**2 + mean_y**2) + eps)
+
+    Averaged across all spectral bands.
+
+    Parameters
+    ----------
+    pred, gt : float32 arrays of identical shape
+
+    Returns
+    -------
+    float in [-1, 1]; 1.0 = identical images.
+    """
+    pred = _to_chw(pred.astype(np.float32))
+    gt = _to_chw(gt.astype(np.float32))
+    _check_shapes(pred, gt)
+
+    if np.array_equal(pred, gt):
+        return 1.0
+
+    scores = []
+    c = pred.shape[0]
+    for b in range(c):
+        x = gt[b].astype(np.float64)
+        y = pred[b].astype(np.float64)
+
+        mean_x = float(np.mean(x))
+        mean_y = float(np.mean(y))
+
+        var_x = float(np.var(x))
+        var_y = float(np.var(y))
+        cov_xy = float(np.mean((x - mean_x) * (y - mean_y)))
+
+        denom = (var_x + var_y) * (mean_x ** 2 + mean_y ** 2)
+        if denom <= eps:
+            scores.append(1.0 if abs(mean_x - mean_y) <= eps else 0.0)
+        else:
+            q = (4.0 * cov_xy * mean_x * mean_y) / denom
+            scores.append(float(np.clip(q, -1.0, 1.0)))
+
+    return float(np.mean(scores))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Batch evaluation
 # ──────────────────────────────────────────────────────────────────────────────
 
-def evaluate_pair(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
-    """Compute PSNR, SSIM, and SAM for a single (pred, gt) pair."""
+def evaluate_pair(pred: np.ndarray, gt: np.ndarray, scale: float = 4.0) -> Dict[str, float]:
+    """Compute PSNR, SSIM, SAM, SRE, ERGAS, and UIQ for a single (pred, gt) pair."""
     return {
         "psnr": psnr(pred, gt),
         "ssim": ssim(pred, gt),
         "sam_deg": sam(pred, gt),
+        "sre": sre(pred, gt),
+        "ergas": ergas(pred, gt, scale=scale),
+        "uiq": uiq(pred, gt),
     }
 
 
@@ -178,14 +311,15 @@ def evaluate_directory(
     pred_dir: Path | str,
     gt_dir: Path | str,
     ext: str = ".npy",
+    scale: float = 4.0,
 ) -> Dict[str, float]:
     """
-    Compute mean PSNR / SSIM / SAM over all matching (pred, gt) file pairs
-    in pred_dir and gt_dir.
+    Compute mean PSNR / SSIM / SAM / SRE / ERGAS / UIQ over all matching
+    (pred, gt) file pairs in pred_dir and gt_dir.
 
     Files are matched by stem (filename without extension).
 
-    Returns dict with mean_psnr, mean_ssim, mean_sam, n_samples.
+    Returns dict with mean metrics and n_samples.
     """
     pred_dir = Path(pred_dir)
     gt_dir = Path(gt_dir)
@@ -193,10 +327,18 @@ def evaluate_directory(
     pred_files = sorted(pred_dir.glob(f"*{ext}"))
     if not pred_files:
         logger.warning("No prediction files found in %s", pred_dir)
-        return {"mean_psnr": float("nan"), "mean_ssim": float("nan"),
-                "mean_sam": float("nan"), "n_samples": 0}
+        return {
+            "mean_psnr": float("nan"),
+            "mean_ssim": float("nan"),
+            "mean_sam": float("nan"),
+            "mean_sre": float("nan"),
+            "mean_ergas": float("nan"),
+            "mean_uiq": float("nan"),
+            "n_samples": 0,
+        }
 
     psnr_vals, ssim_vals, sam_vals = [], [], []
+    sre_vals, ergas_vals, uiq_vals = [], [], []
     missing = 0
 
     for pf in pred_files:
@@ -208,10 +350,13 @@ def evaluate_directory(
         gt_arr = np.load(gf) if ext == ".npy" else _load_tif(gf)
 
         try:
-            m = evaluate_pair(pred, gt_arr)
+            m = evaluate_pair(pred, gt_arr, scale=scale)
             psnr_vals.append(m["psnr"])
             ssim_vals.append(m["ssim"])
             sam_vals.append(m["sam_deg"])
+            sre_vals.append(m["sre"])
+            ergas_vals.append(m["ergas"])
+            uiq_vals.append(m["uiq"])
         except Exception as exc:
             logger.warning("Skipping %s: %s", pf.name, exc)
 
@@ -223,6 +368,9 @@ def evaluate_directory(
         "mean_psnr": float(np.mean(psnr_vals)) if psnr_vals else float("nan"),
         "mean_ssim": float(np.mean(ssim_vals)) if ssim_vals else float("nan"),
         "mean_sam": float(np.mean(sam_vals)) if sam_vals else float("nan"),
+        "mean_sre": float(np.mean(sre_vals)) if sre_vals else float("nan"),
+        "mean_ergas": float(np.mean(ergas_vals)) if ergas_vals else float("nan"),
+        "mean_uiq": float(np.mean(uiq_vals)) if uiq_vals else float("nan"),
         "n_samples": n,
     }
 

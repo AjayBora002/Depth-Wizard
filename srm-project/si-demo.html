@@ -387,7 +387,7 @@ python src/pair_generation.py --raw-dir data/raw --out-dir data/synthetic_pairs
 python src/train.py --epochs 20 --batch-size 2 --crop-size 128
 
 <span style="color: #fcd34d;"># 3. Generate demo visualization</span>
-python src/demo_inference.py --input data/raw/S2_Delhi_Sample_512.tif --compare
+python src/demo_inference.py --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff --compare
 
 <span style="color: #fcd34d;"># 4. View results</span>
 start data/outputs/demo_comparison.png
@@ -468,7 +468,7 @@ srm-project/
         }
 
         function generateDemo() {
-            alert('Demo visualization would generate:\n1. Side-by-side comparison image\n2. Zoomed detail view\n3. Metrics overlay with PSNR/SSIM scores\n\nCommand: python src/demo_inference.py --input data/raw/S2_Delhi_Sample_512.tif --compare');
+            alert('Demo visualization would generate:\n1. Side-by-side comparison image\n2. Zoomed detail view\n3. Metrics overlay with PSNR/SSIM scores\n\nCommand: python src/demo_inference.py --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff --compare');
         }
     </script>
 </body>

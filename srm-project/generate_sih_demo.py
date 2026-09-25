@@ -267,7 +267,7 @@ Examples:
   python generate_sih_demo.py
 
   # Process specific image
-  python generate_sih_demo.py --input data/raw/S2_Delhi_Sample_512.tif
+  python generate_sih_demo.py --input data/raw/2026-04-08-00_00_2026-04-08-23_59_Sentinel-2_L2A_True_color.tiff
 
   # Custom output directory
   python generate_sih_demo.py --output-dir /tmp/sih_demo/
