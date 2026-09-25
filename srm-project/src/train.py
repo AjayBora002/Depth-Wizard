@@ -296,30 +296,19 @@ class CropDataset(torch.utils.data.Dataset):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _compute_batch_ssim(pred: torch.Tensor, target: torch.Tensor) -> float:
-    """Compute mean SSIM across batch and channels with safe fallback."""
-    try:
-        from skimage.metrics import structural_similarity
-        pred_np = pred.detach().cpu().numpy()
-        target_np = target.detach().cpu().numpy()
-        scores = []
-        for b in range(pred_np.shape[0]):
-            for c in range(pred_np.shape[1]):
-                scores.append(structural_similarity(target_np[b, c], pred_np[b, c], data_range=1.0))
-        return float(np.mean(scores)) if scores else 0.0
-    except Exception:
-        # Vectorized PyTorch approximation of SSIM if skimage is unavailable
-        p = pred.float()
-        t = target.float()
-        mu_p = F.avg_pool2d(p, 11, stride=1, padding=5)
-        mu_t = F.avg_pool2d(t, 11, stride=1, padding=5)
-        sigma_p_sq = F.avg_pool2d(p * p, 11, stride=1, padding=5) - mu_p.pow(2)
-        sigma_t_sq = F.avg_pool2d(t * t, 11, stride=1, padding=5) - mu_t.pow(2)
-        sigma_pt = F.avg_pool2d(p * t, 11, stride=1, padding=5) - mu_p * mu_t
-        c1, c2 = 0.01**2, 0.03**2
-        ssim_map = ((2 * mu_p * mu_t + c1) * (2 * sigma_pt + c2)) / (
-            (mu_p.pow(2) + mu_t.pow(2) + c1) * (sigma_p_sq + sigma_t_sq + c2)
-        )
-        return float(ssim_map.mean().item())
+    """Vectorized GPU SSIM calculation (sub-millisecond, eliminates CPU bottlenecks)."""
+    p = pred.float()
+    t = target.float()
+    mu_p = F.avg_pool2d(p, 11, stride=1, padding=5)
+    mu_t = F.avg_pool2d(t, 11, stride=1, padding=5)
+    sigma_p_sq = F.avg_pool2d(p * p, 11, stride=1, padding=5) - mu_p.pow(2)
+    sigma_t_sq = F.avg_pool2d(t * t, 11, stride=1, padding=5) - mu_t.pow(2)
+    sigma_pt = F.avg_pool2d(p * t, 11, stride=1, padding=5) - mu_p * mu_t
+    c1, c2 = 0.01**2, 0.03**2
+    ssim_map = ((2 * mu_p * mu_t + c1) * (2 * sigma_pt + c2)) / (
+        (mu_p.pow(2) + mu_t.pow(2) + c1) * (sigma_p_sq + sigma_t_sq + c2)
+    )
+    return float(ssim_map.clamp(0.0, 1.0).mean().item())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -558,12 +547,13 @@ def train(
 
             train_losses.append(loss.item())
 
-            if (batch_idx + 1) % 20 == 0 or (batch_idx + 1) == len(train_loader):
-                logger.info(
-                    "  Epoch %02d/%02d | Batch %03d/%03d | Loss=%.4f | LR=%.2e",
-                    epoch, epochs, batch_idx + 1, len(train_loader), loss.item(),
-                    optimizer.param_groups[0]["lr"],
+            if (batch_idx + 1) % 15 == 0 or (batch_idx + 1) == len(train_loader):
+                batch_msg = (
+                    f"  Epoch {epoch:02d}/{epochs:02d} | Batch {batch_idx + 1:03d}/{len(train_loader):03d} "
+                    f"| Loss={loss.item():.4f} | LR={optimizer.param_groups[0]['lr']:.2e}"
                 )
+                print(batch_msg, flush=True)
+                logger.info(batch_msg)
 
         scheduler.step()
 
@@ -603,10 +593,17 @@ def train(
         history["epoch_time"].append(round(epoch_time, 2))
         history["learning_rate"].append(optimizer.param_groups[0]["lr"])
 
-        logger.info(
-            "Epoch %02d/%02d | Train: %.4f | Val: %.4f | PSNR: %.2f dB | SSIM: %.4f | %.1fs",
-            epoch, epochs, mean_train, mean_val, mean_psnr, mean_ssim, epoch_time,
+        epoch_summary = (
+            f"\n⭐ Epoch {epoch:02d}/{epochs:02d} | Train: {mean_train:.4f} | Val: {mean_val:.4f} "
+            f"| PSNR: {mean_psnr:.2f} dB | SSIM: {mean_ssim:.4f} | Time: {epoch_time:.1f}s"
         )
+        print(epoch_summary, flush=True)
+        logger.info(epoch_summary)
+
+        # Save history JSON every single epoch so progress is never lost if interrupted
+        hist_path = output_dir / "training_history.json"
+        with open(hist_path, "w") as f:
+            json.dump(history, f, indent=2)
 
         # Best checkpoint selection
         if mean_psnr > best_val_psnr:
@@ -616,7 +613,9 @@ def train(
                 model, best_checkpoint_path, epoch=epoch,
                 extra_info={"val_loss": mean_val, "val_psnr": mean_psnr, "val_ssim": mean_ssim},
             )
-            logger.info("  ✓ Best checkpoint updated! (Val PSNR=%.2f dB, SSIM=%.4f)", mean_psnr, mean_ssim)
+            update_msg = f"  ✓ Best checkpoint updated! (Val PSNR={mean_psnr:.2f} dB, SSIM={mean_ssim:.4f})\n"
+            print(update_msg, flush=True)
+            logger.info(update_msg)
         else:
             patience_counter += 1
 
