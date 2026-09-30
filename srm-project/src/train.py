@@ -312,6 +312,31 @@ def _compute_batch_ssim(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Staged Fine-Tuning
+# ──────────────────────────────────────────────────────────────────────────────
+
+def set_staged_fine_tuning(model: nn.Module, freeze_backbone: bool) -> list[str]:
+    """Freeze/unfreeze the pretrained feature-extraction portion of RRDBNet.
+
+    During the initial frozen phase, the early feature extraction and RRDB body
+    keep their pretrained weights while the upsampling/reconstruction layers
+    adapt to Sentinel-2 imagery. After the freeze period, all parameters are
+    trainable again. Unknown model architectures are left untouched.
+    """
+    frozen_names = []
+    backbone_parts = ("conv_first", "body", "conv_body")
+
+    for name, param in model.named_parameters():
+        if freeze_backbone and any(part in name for part in backbone_parts):
+            param.requires_grad = False
+            frozen_names.append(name)
+        else:
+            param.requires_grad = True
+
+    return frozen_names
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main Training Routine
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -337,6 +362,7 @@ def train(
     use_amp: bool = True,
     use_gradient_checkpointing: bool = False,
     warmup_epochs: int = 5,
+    freeze_epochs: int = 5,
     early_stopping_patience: int = 15,
     time_budget_hours: Optional[float] = None,
     ablation_name: str = "custom",
@@ -415,6 +441,14 @@ def train(
 
     model.train()
 
+    # ── Staged fine-tuning: keep pretrained feature extraction stable first.
+    freeze_epochs = max(0, min(freeze_epochs, epochs))
+    frozen_param_names = set_staged_fine_tuning(model, freeze_backbone=(freeze_epochs > 0))
+    logger.info(
+        "Staged fine-tuning: backbone frozen for %d epoch(s); %d parameters frozen",
+        freeze_epochs, len(frozen_param_names),
+    )
+
     # ── Loss Suite Configuration (Zero overhead when lambda=0) ───────────────
     active_losses = []
     l1_loss = nn.L1Loss() if lambda_l1 > 0 else None
@@ -465,6 +499,8 @@ def train(
         "crop_size": crop_size,
         "lr": lr,
         "warmup_epochs": warmup_epochs,
+        "staged_fine_tuning": freeze_epochs > 0,
+        "freeze_epochs": freeze_epochs,
     }
 
     history = {
@@ -491,6 +527,12 @@ def train(
 
     for epoch in range(1, epochs + 1):
         t_start = time.time()
+
+        # Unfreeze the pretrained backbone after the configured warm-start phase.
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            set_staged_fine_tuning(model, freeze_backbone=False)
+            logger.info("✓ Epoch %d: all model layers are now unfrozen", epoch)
+
         model.train()
         train_losses = []
 
@@ -667,6 +709,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--warmup-epochs", type=int, default=5)
+    parser.add_argument("--freeze-epochs", type=int, default=5, help="Freeze early RRDB feature layers for this many epochs before full fine-tuning")
     parser.add_argument("--early-stopping-patience", type=int, default=15)
     parser.add_argument("--time-budget-hours", type=float, default=None)
     parser.add_argument("--save-every", type=int, default=10)
@@ -787,6 +830,7 @@ if __name__ == "__main__":
         use_amp=(not args.no_amp),
         use_gradient_checkpointing=args.use_gradient_checkpointing,
         warmup_epochs=args.warmup_epochs,
+        freeze_epochs=args.freeze_epochs,
         early_stopping_patience=args.early_stopping_patience,
         time_budget_hours=args.time_budget_hours,
         ablation_name=ablation_name,
