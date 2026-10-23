@@ -1,4 +1,4 @@
-﻿"""
+"""
 evaluate_metrics.py
 ===================
 Full metrics evaluation for SIH26142 SRM project.
@@ -127,7 +127,7 @@ def save_table(results, out_path, n_patches, scale):
            for i in range(len(models))]
     ax.legend(handles=leg, loc='lower right', fontsize=9, bbox_to_anchor=(1.0, -0.15), ncol=3)
     plt.tight_layout()
-    plt.savefig(str(out_path), dpi=200, bbox_inches='tight', facecolor='white')
+    plt.savefig(str(out_path), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close()
     print(f'  Table  -> {out_path}')
 
@@ -148,7 +148,7 @@ def save_barplot(results, out_path):
     ax.legend(fontsize=10)
     ax.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(str(out_path), dpi=150, bbox_inches='tight')
+    plt.savefig(str(out_path), dpi=600, bbox_inches='tight')
     plt.close()
     print(f'  Barplot-> {out_path}')
 
