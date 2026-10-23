@@ -369,7 +369,7 @@ def save_uncertainty_heatmap(
         plt.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04, label="Std Dev")
 
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
     logger.info("Uncertainty heatmap saved → %s", out_path)
 
