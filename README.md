@@ -496,10 +496,4 @@ Documented in [`srm-project/BUG_FIXES.md`](srm-project/BUG_FIXES.md):
 
 ---
 
-## 📄 License & Acknowledgements
 
-- **License**: MIT License. Pretrained `RealESRGAN_x4plus` weights are under BSD 3-Clause (`xinntao/Real-ESRGAN`). Sentinel-2 L2A imagery is provided by the ESA Copernicus Programme (CC BY-SA 3.0 IGO).
-- **Acknowledgements**:
-  - [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
-  - ESA Copernicus Data Space Ecosystem
-  - **SIH26142** Problem Statement — **NTRO** (Smart India Hackathon 2026)
